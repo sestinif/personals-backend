@@ -2,7 +2,12 @@ import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
-import db from './db.js'
+import { downloadDb, uploadDb } from './github-sync.js'
+
+// Download DB from GitHub before loading it
+await downloadDb()
+
+const { default: db } = await import('./db.js')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -10,6 +15,18 @@ const JWT_SECRET = process.env.JWT_SECRET || 'personals-secret-change-in-product
 
 app.use(cors())
 app.use(express.json())
+
+// Auto-sync DB to GitHub after any write operation
+app.use((req, res, next) => {
+  if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
+    const origJson = res.json.bind(res)
+    res.json = (data) => {
+      origJson(data)
+      if (res.statusCode < 400) uploadDb()
+    }
+  }
+  next()
+})
 
 // === AUTH MIDDLEWARE ===
 
