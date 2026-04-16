@@ -2,12 +2,9 @@ import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
-import { downloadDb, uploadDb } from './github-sync.js'
+import db, { initDb } from './db.js'
 
-// Download DB from GitHub before loading it
-await downloadDb()
-
-const { default: db } = await import('./db.js')
+await initDb()
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -15,18 +12,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'personals-secret-change-in-product
 
 app.use(cors())
 app.use(express.json())
-
-// Auto-sync DB to GitHub after any write operation
-app.use((req, res, next) => {
-  if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
-    const origJson = res.json.bind(res)
-    res.json = (data) => {
-      origJson(data)
-      if (res.statusCode < 400) uploadDb()
-    }
-  }
-  next()
-})
 
 // === AUTH MIDDLEWARE ===
 
@@ -46,37 +31,28 @@ function authenticate(req, res, next) {
 
 // === AUTH ROUTES ===
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { username, password } = req.body
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username e password sono obbligatori' })
-  }
-  if (username.length < 3) {
-    return res.status(400).json({ error: 'Username deve avere almeno 3 caratteri' })
-  }
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password deve avere almeno 6 caratteri' })
-  }
+  if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
+  if (username.length < 3) return res.status(400).json({ error: 'Username deve avere almeno 3 caratteri' })
+  if (password.length < 6) return res.status(400).json({ error: 'Password deve avere almeno 6 caratteri' })
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username)
-  if (existing) {
-    return res.status(409).json({ error: 'Username già in uso' })
-  }
+  const existing = await db.execute({ sql: 'SELECT id FROM users WHERE username = ?', args: [username] })
+  if (existing.rows.length) return res.status(409).json({ error: 'Username già in uso' })
 
   const hash = bcrypt.hashSync(password, 10)
-  const result = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(username, hash)
-  const token = jwt.sign({ userId: result.lastInsertRowid }, JWT_SECRET, { expiresIn: '30d' })
-
-  res.status(201).json({ token, user: { id: result.lastInsertRowid, username } })
+  const result = await db.execute({ sql: 'INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id', args: [username, hash] })
+  const userId = result.rows[0].id
+  const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' })
+  res.status(201).json({ token, user: { id: userId, username } })
 })
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username e password sono obbligatori' })
-  }
+  if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username)
+  const result = await db.execute({ sql: 'SELECT * FROM users WHERE username = ?', args: [username] })
+  const user = result.rows[0]
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Credenziali non valide' })
   }
@@ -85,10 +61,10 @@ app.post('/api/auth/login', (req, res) => {
   res.json({ token, user: { id: user.id, username: user.username } })
 })
 
-app.get('/api/auth/me', authenticate, (req, res) => {
-  const user = db.prepare('SELECT id, username, created_at FROM users WHERE id = ?').get(req.userId)
-  if (!user) return res.status(404).json({ error: 'User not found' })
-  res.json(user)
+app.get('/api/auth/me', authenticate, async (req, res) => {
+  const result = await db.execute({ sql: 'SELECT id, username, created_at FROM users WHERE id = ?', args: [req.userId] })
+  if (!result.rows.length) return res.status(404).json({ error: 'User not found' })
+  res.json(result.rows[0])
 })
 
 // === ALL ROUTES BELOW REQUIRE AUTH ===
@@ -99,112 +75,119 @@ app.use('/api/dashboard', authenticate)
 
 // === ACCOUNTS ===
 
-app.get('/api/accounts', (req, res) => {
-  const accounts = db.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY sort_order').all(req.userId)
-  res.json(accounts)
+app.get('/api/accounts', async (req, res) => {
+  const result = await db.execute({ sql: 'SELECT * FROM accounts WHERE user_id = ? ORDER BY sort_order', args: [req.userId] })
+  res.json(result.rows)
 })
 
-app.post('/api/accounts', (req, res) => {
+app.post('/api/accounts', async (req, res) => {
   const { name, icon, color } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
-  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as max FROM accounts WHERE user_id = ?').get(req.userId)
-  const result = db.prepare('INSERT INTO accounts (user_id, name, icon, color, sort_order) VALUES (?, ?, ?, ?, ?)')
-    .run(req.userId, name, icon || 'credit-card', color || '#6366f1', maxOrder.max + 1)
-  const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(result.lastInsertRowid)
-  res.status(201).json(account)
+  const maxOrder = await db.execute({ sql: 'SELECT COALESCE(MAX(sort_order), 0) as max FROM accounts WHERE user_id = ?', args: [req.userId] })
+  const result = await db.execute({
+    sql: 'INSERT INTO accounts (user_id, name, icon, color, sort_order) VALUES (?, ?, ?, ?, ?) RETURNING *',
+    args: [req.userId, name, icon || 'credit-card', color || '#6366f1', maxOrder.rows[0].max + 1]
+  })
+  res.status(201).json(result.rows[0])
 })
 
-app.put('/api/accounts/:id', (req, res) => {
+app.put('/api/accounts/:id', async (req, res) => {
   const { name, icon, color } = req.body
-  db.prepare('UPDATE accounts SET name = COALESCE(?, name), icon = COALESCE(?, icon), color = COALESCE(?, color) WHERE id = ? AND user_id = ?')
-    .run(name, icon, color, req.params.id, req.userId)
-  const account = db.prepare('SELECT * FROM accounts WHERE id = ? AND user_id = ?').get(req.params.id, req.userId)
-  if (!account) return res.status(404).json({ error: 'Account not found' })
-  res.json(account)
+  await db.execute({
+    sql: 'UPDATE accounts SET name = COALESCE(?, name), icon = COALESCE(?, icon), color = COALESCE(?, color) WHERE id = ? AND user_id = ?',
+    args: [name, icon, color, req.params.id, req.userId]
+  })
+  const result = await db.execute({ sql: 'SELECT * FROM accounts WHERE id = ? AND user_id = ?', args: [req.params.id, req.userId] })
+  if (!result.rows.length) return res.status(404).json({ error: 'Account not found' })
+  res.json(result.rows[0])
 })
 
-app.delete('/api/accounts/:id', (req, res) => {
-  const result = db.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').run(req.params.id, req.userId)
-  if (result.changes === 0) return res.status(404).json({ error: 'Account not found' })
+app.delete('/api/accounts/:id', async (req, res) => {
+  // Delete expenses first (no CASCADE in libSQL)
+  await db.execute({ sql: 'DELETE FROM expenses WHERE account_id = ?', args: [req.params.id] })
+  const result = await db.execute({ sql: 'DELETE FROM accounts WHERE id = ? AND user_id = ?', args: [req.params.id, req.userId] })
+  if (result.rowsAffected === 0) return res.status(404).json({ error: 'Account not found' })
   res.json({ success: true })
 })
 
 // === EXPENSES ===
 
-app.get('/api/expenses', (req, res) => {
+app.get('/api/expenses', async (req, res) => {
   const { account_id } = req.query
   if (account_id) {
-    const account = db.prepare('SELECT id FROM accounts WHERE id = ? AND user_id = ?').get(account_id, req.userId)
-    if (!account) return res.json([])
-    res.json(db.prepare('SELECT * FROM expenses WHERE account_id = ? ORDER BY created_at').all(account_id))
+    const acc = await db.execute({ sql: 'SELECT id FROM accounts WHERE id = ? AND user_id = ?', args: [account_id, req.userId] })
+    if (!acc.rows.length) return res.json([])
+    const result = await db.execute({ sql: 'SELECT * FROM expenses WHERE account_id = ? ORDER BY created_at', args: [account_id] })
+    res.json(result.rows)
   } else {
-    res.json(db.prepare(`
-      SELECT e.* FROM expenses e
-      JOIN accounts a ON a.id = e.account_id
-      WHERE a.user_id = ?
-      ORDER BY e.account_id, e.created_at
-    `).all(req.userId))
+    const result = await db.execute({
+      sql: 'SELECT e.* FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE a.user_id = ? ORDER BY e.account_id, e.created_at',
+      args: [req.userId]
+    })
+    res.json(result.rows)
   }
 })
 
-app.post('/api/expenses', (req, res) => {
+app.post('/api/expenses', async (req, res) => {
   const { account_id, name, amount, renewal_day } = req.body
-  if (!account_id || !name || amount == null) {
-    return res.status(400).json({ error: 'account_id, name, and amount are required' })
-  }
-  const account = db.prepare('SELECT id FROM accounts WHERE id = ? AND user_id = ?').get(account_id, req.userId)
-  if (!account) return res.status(403).json({ error: 'Account not owned by user' })
+  if (!account_id || !name || amount == null) return res.status(400).json({ error: 'account_id, name, and amount are required' })
 
-  const result = db.prepare('INSERT INTO expenses (account_id, name, amount, renewal_day) VALUES (?, ?, ?, ?)')
-    .run(account_id, name, amount, renewal_day || null)
-  const expense = db.prepare('SELECT * FROM expenses WHERE id = ?').get(result.lastInsertRowid)
-  res.status(201).json(expense)
+  const acc = await db.execute({ sql: 'SELECT id FROM accounts WHERE id = ? AND user_id = ?', args: [account_id, req.userId] })
+  if (!acc.rows.length) return res.status(403).json({ error: 'Account not owned by user' })
+
+  const result = await db.execute({
+    sql: 'INSERT INTO expenses (account_id, name, amount, renewal_day) VALUES (?, ?, ?, ?) RETURNING *',
+    args: [account_id, name, amount, renewal_day || null]
+  })
+  res.status(201).json(result.rows[0])
 })
 
-app.put('/api/expenses/:id', (req, res) => {
+app.put('/api/expenses/:id', async (req, res) => {
   const { name, amount, renewal_day, account_id } = req.body
-  const expense = db.prepare(`
-    SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id
-    WHERE e.id = ? AND a.user_id = ?
-  `).get(req.params.id, req.userId)
-  if (!expense) return res.status(404).json({ error: 'Expense not found' })
+  const check = await db.execute({
+    sql: 'SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE e.id = ? AND a.user_id = ?',
+    args: [req.params.id, req.userId]
+  })
+  if (!check.rows.length) return res.status(404).json({ error: 'Expense not found' })
 
-  db.prepare('UPDATE expenses SET name = COALESCE(?, name), amount = COALESCE(?, amount), renewal_day = COALESCE(?, renewal_day), account_id = COALESCE(?, account_id) WHERE id = ?')
-    .run(name, amount, renewal_day, account_id, req.params.id)
-  res.json(db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id))
+  await db.execute({
+    sql: 'UPDATE expenses SET name = COALESCE(?, name), amount = COALESCE(?, amount), renewal_day = COALESCE(?, renewal_day), account_id = COALESCE(?, account_id) WHERE id = ?',
+    args: [name, amount, renewal_day, account_id, req.params.id]
+  })
+  const result = await db.execute({ sql: 'SELECT * FROM expenses WHERE id = ?', args: [req.params.id] })
+  res.json(result.rows[0])
 })
 
-app.delete('/api/expenses/:id', (req, res) => {
-  const expense = db.prepare(`
-    SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id
-    WHERE e.id = ? AND a.user_id = ?
-  `).get(req.params.id, req.userId)
-  if (!expense) return res.status(404).json({ error: 'Expense not found' })
+app.delete('/api/expenses/:id', async (req, res) => {
+  const check = await db.execute({
+    sql: 'SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE e.id = ? AND a.user_id = ?',
+    args: [req.params.id, req.userId]
+  })
+  if (!check.rows.length) return res.status(404).json({ error: 'Expense not found' })
 
-  db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.id)
+  await db.execute({ sql: 'DELETE FROM expenses WHERE id = ?', args: [req.params.id] })
   res.json({ success: true })
 })
 
 // === DASHBOARD ===
 
-app.get('/api/dashboard', (req, res) => {
-  const accounts = db.prepare(`
-    SELECT a.*, COALESCE(SUM(e.amount), 0) as total
-    FROM accounts a
-    LEFT JOIN expenses e ON e.account_id = a.id
-    WHERE a.user_id = ?
-    GROUP BY a.id
-    ORDER BY a.sort_order
-  `).all(req.userId)
+app.get('/api/dashboard', async (req, res) => {
+  const accountsResult = await db.execute({
+    sql: `SELECT a.*, COALESCE(SUM(e.amount), 0) as total
+          FROM accounts a LEFT JOIN expenses e ON e.account_id = a.id
+          WHERE a.user_id = ? GROUP BY a.id ORDER BY a.sort_order`,
+    args: [req.userId]
+  })
 
-  const grandTotal = accounts.reduce((sum, a) => sum + a.total, 0)
-  const totalExpenses = db.prepare(`
-    SELECT COUNT(*) as count FROM expenses e
-    JOIN accounts a ON a.id = e.account_id
-    WHERE a.user_id = ?
-  `).get(req.userId).count
+  const accounts = accountsResult.rows
+  const grandTotal = accounts.reduce((sum, a) => sum + Number(a.total), 0)
 
-  res.json({ accounts, grandTotal, totalExpenses })
+  const countResult = await db.execute({
+    sql: 'SELECT COUNT(*) as count FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE a.user_id = ?',
+    args: [req.userId]
+  })
+
+  res.json({ accounts, grandTotal, totalExpenses: Number(countResult.rows[0].count) })
 })
 
 app.listen(PORT, () => {
