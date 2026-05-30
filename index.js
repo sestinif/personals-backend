@@ -174,7 +174,7 @@ app.delete('/api/expenses/:id', async (req, res) => {
 app.get('/api/dashboard', async (req, res) => {
   const accountsResult = await db.execute({
     sql: `SELECT a.*,
-            COALESCE(SUM(CASE WHEN e.frequency = 'yearly' THEN e.amount / 12.0 ELSE e.amount END), 0) as total
+            COALESCE(SUM(CASE WHEN e.frequency = 'yearly' OR LOWER(TRIM(e.renewal_day)) LIKE '%annuale%' THEN e.amount / 12.0 ELSE e.amount END), 0) as total
           FROM accounts a LEFT JOIN expenses e ON e.account_id = a.id
           WHERE a.user_id = ? GROUP BY a.id ORDER BY a.sort_order`,
     args: [req.userId]
