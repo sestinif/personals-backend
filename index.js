@@ -191,6 +191,14 @@ app.get('/api/dashboard', async (req, res) => {
   res.json({ accounts, grandTotal, totalExpenses: Number(countResult.rows[0].count) })
 })
 
+app.get('/api/debug/expenses', authenticate, async (req, res) => {
+  const result = await db.execute({
+    sql: 'SELECT e.id, e.name, e.amount, e.renewal_day, e.frequency, e.expense_type, e.end_date FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE a.user_id = ?',
+    args: [req.userId]
+  })
+  res.json(result.rows)
+})
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
 })
