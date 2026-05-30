@@ -48,7 +48,7 @@ export async function initDb() {
   ]) {
     try { await db.execute(`ALTER TABLE expenses ADD COLUMN ${col[0]} ${col[1]}`) } catch {}
   }
-  await db.execute(`UPDATE expenses SET frequency = 'yearly', renewal_day = NULL WHERE renewal_day = 'annuale' OR renewal_day = 'annnuale'`)
+  await db.execute(`UPDATE expenses SET frequency = 'yearly', renewal_day = NULL WHERE LOWER(TRIM(renewal_day)) LIKE '%annuale%'`)
 
   console.log('Database initialized')
 }
