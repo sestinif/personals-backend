@@ -45,6 +45,9 @@ function authenticate(req, res, next) {
 // === AUTH ROUTES ===
 
 app.post('/api/auth/register', route(async (req, res) => {
+  // Closed unless explicitly opened: this is a personal app, not a public signup
+  if (process.env.ALLOW_REGISTRATION !== 'true') return res.status(403).json({ error: 'Registrazione chiusa' })
+
   const { username, password } = req.body
   if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
   if (username.length < 3) return res.status(400).json({ error: 'Username deve avere almeno 3 caratteri' })
@@ -210,14 +213,6 @@ app.get('/api/dashboard', route(async (req, res) => {
   })
 
   res.json({ accounts, grandTotal, totalExpenses: Number(countResult.rows[0].count) })
-}))
-
-app.get('/api/debug/expenses', authenticate, route(async (req, res) => {
-  const result = await db.execute({
-    sql: 'SELECT e.id, e.name, e.amount, e.renewal_day, e.frequency, e.expense_type, e.end_date FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE a.user_id = ?',
-    args: [req.userId]
-  })
-  res.json(result.rows)
 }))
 
 // === ERROR HANDLER ===

@@ -3,13 +3,20 @@ import db, { initDb } from './db.js'
 
 await initDb()
 
+// The password comes from the environment: one written here would be public with the repo
+const password = process.env.SEED_PASSWORD
+if (!password) {
+  console.log('SEED_PASSWORD not set, skipping seed')
+  process.exit(0)
+}
+
 const existing = await db.execute({ sql: 'SELECT id FROM users WHERE username = ?', args: ['demo'] })
 if (existing.rows.length) {
   console.log('Demo user already exists, skipping seed')
   process.exit(0)
 }
 
-const hash = bcrypt.hashSync('demo123', 10)
+const hash = bcrypt.hashSync(password, 10)
 const user = await db.execute({ sql: 'INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id', args: ['demo', hash] })
 const uid = user.rows[0].id
 
@@ -32,5 +39,5 @@ await exp(a2,'Dominio (LLC)',0.75,'annuale'); await exp(a2,'Render',20.00,'14')
 await exp(a3,'Affitto',1000.00,'15'); await exp(a3,'Bollette + Internet',125.00,'15'); await exp(a3,'Assistente Personale',350.00,'5'); await exp(a3,'Claude',89.00,'30')
 await exp(a4,'Conto corrente',9.00,'5')
 
-console.log('Seeded! Demo: demo / demo123')
+console.log('Seeded! Demo user: demo')
 process.exit(0)

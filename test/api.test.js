@@ -38,6 +38,18 @@ async function call(path, { method = 'GET', body, as = token } = {}) {
 
 const alive = () => server.exitCode === null && server.signalCode === null
 
+// Lancia uno script del backend e aspetta che finisca
+async function runNode(script, env) {
+  const child = spawn(process.execPath, [script], { cwd: root, env })
+  let log = ''
+  child.stdout.on('data', (d) => { log += d })
+  child.stderr.on('data', (d) => { log += d })
+  const timer = setTimeout(() => child.kill(), 5000)
+  const [code] = await once(child, 'exit')
+  clearTimeout(timer)
+  return { code, log }
+}
+
 // Un secondo utente, per controllare che non tocchi i dati del primo
 async function otherUser(username) {
   const reg = await call('/auth/register', { method: 'POST', body: { username, password: 'intruso123' } })
@@ -51,7 +63,7 @@ before(async () => {
   base = `http://127.0.0.1:${port}/api`
   server = spawn(process.execPath, ['index.js'], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), TURSO_DATABASE_URL: `file:${join(tmp, 'test.db')}`, TURSO_AUTH_TOKEN: '', JWT_SECRET: 'solo-per-i-test' },
+    env: { ...process.env, PORT: String(port), TURSO_DATABASE_URL: `file:${join(tmp, 'test.db')}`, TURSO_AUTH_TOKEN: '', JWT_SECRET: 'solo-per-i-test', ALLOW_REGISTRATION: 'true' },
   })
   server.stdout.on('data', (d) => { serverLog += d })
   server.stderr.on('data', (d) => { serverLog += d })
@@ -204,4 +216,46 @@ test('senza JWT_SECRET il server non parte', async () => {
 
   assert.equal(code, 1, `il server è partito lo stesso:\n${log}`)
   assert.match(log, /JWT_SECRET/)
+})
+
+test('GET /debug/expenses non esiste più', async () => {
+  const res = await call('/debug/expenses')
+  assert.equal(res.status, 404, res.text)
+})
+
+test('senza ALLOW_REGISTRATION la registrazione è chiusa, il login no, e il seed non crea utenti con una password nota', async () => {
+  const port = await freePort()
+  const env = { ...process.env, PORT: String(port), TURSO_DATABASE_URL: `file:${join(tmp, 'closed.db')}`, TURSO_AUTH_TOKEN: '', JWT_SECRET: 'solo-per-i-test' }
+  delete env.ALLOW_REGISTRATION
+  delete env.SEED_PASSWORD
+
+  // Senza SEED_PASSWORD il seed non deve creare l'utente demo: se lo creasse,
+  // il secondo giro lo troverebbe già lì e la password scelta non varrebbe.
+  const skipped = await runNode('seed.js', env)
+  assert.equal(skipped.code, 0, skipped.log)
+  const seeded = await runNode('seed.js', { ...env, SEED_PASSWORD: 'scelta-da-me-1' })
+  assert.equal(seeded.code, 0, seeded.log)
+  assert.ok(!seeded.log.includes('scelta-da-me-1'), 'il seed stampa la password nel log')
+
+  const closed = spawn(process.execPath, ['index.js'], { cwd: root, env })
+  let log = ''
+  closed.stdout.on('data', (d) => { log += d })
+  closed.stderr.on('data', (d) => { log += d })
+  try {
+    for (let i = 0; i < 100 && !log.includes('Server running'); i++) await new Promise((r) => setTimeout(r, 50))
+    assert.ok(log.includes('Server running'), `il server non è partito:\n${log}`)
+    const post = (path, body) => fetch(`http://127.0.0.1:${port}/api${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+
+    const reg = await post('/auth/register', { username: 'sconosciuto', password: 'sconosciuto1' })
+    assert.equal(reg.status, 403)
+    const again = await post('/auth/login', { username: 'sconosciuto', password: 'sconosciuto1' })
+    assert.equal(again.status, 401, 'la registrazione ha creato lo stesso l\'utente')
+
+    const login = await post('/auth/login', { username: 'demo', password: 'scelta-da-me-1' })
+    assert.equal(login.status, 200)
+  } finally {
+    closed.kill()
+  }
 })
