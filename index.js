@@ -99,6 +99,8 @@ app.get('/api/accounts', route(async (req, res) => {
 app.post('/api/accounts', route(async (req, res) => {
   const { name, icon, color } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
+  const taken = await db.execute({ sql: 'SELECT id FROM accounts WHERE user_id = ? AND name = ?', args: [req.userId, name] })
+  if (taken.rows.length) return res.status(409).json({ error: 'Esiste già un conto con questo nome' })
   const maxOrder = await db.execute({ sql: 'SELECT COALESCE(MAX(sort_order), 0) as max FROM accounts WHERE user_id = ?', args: [req.userId] })
   const result = await db.execute({
     sql: 'INSERT INTO accounts (user_id, name, icon, color, sort_order) VALUES (?, ?, ?, ?, ?) RETURNING *',
@@ -109,6 +111,10 @@ app.post('/api/accounts', route(async (req, res) => {
 
 app.put('/api/accounts/:id', route(async (req, res) => {
   const { name, icon, color } = req.body
+  if (name != null) {
+    const taken = await db.execute({ sql: 'SELECT id FROM accounts WHERE user_id = ? AND name = ? AND id != ?', args: [req.userId, name, req.params.id] })
+    if (taken.rows.length) return res.status(409).json({ error: 'Esiste già un conto con questo nome' })
+  }
   await db.execute({
     sql: 'UPDATE accounts SET name = COALESCE(?, name), icon = COALESCE(?, icon), color = COALESCE(?, color) WHERE id = ? AND user_id = ?',
     args: [orNull(name), orNull(icon), orNull(color), req.params.id, req.userId]
@@ -164,19 +170,24 @@ app.post('/api/expenses', route(async (req, res) => {
 app.put('/api/expenses/:id', route(async (req, res) => {
   const { name, amount, renewal_day, account_id, frequency, expense_type, end_date } = req.body
   const check = await db.execute({
-    sql: 'SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE e.id = ? AND a.user_id = ?',
+    sql: 'SELECT e.id, e.renewal_day, e.end_date FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE e.id = ? AND a.user_id = ?',
     args: [req.params.id, req.userId]
   })
   if (!check.rows.length) return res.status(404).json({ error: 'Expense not found' })
+  const current = check.rows[0]
 
   if (account_id != null) {
     const acc = await db.execute({ sql: 'SELECT id FROM accounts WHERE id = ? AND user_id = ?', args: [account_id, req.userId] })
     if (!acc.rows.length) return res.status(403).json({ error: 'Account not owned by user' })
   }
 
+  // renewal_day and end_date can be cleared: a missing field keeps the stored value, an empty one clears it
+  const nextRenewalDay = renewal_day === undefined ? current.renewal_day : renewal_day || null
+  const nextEndDate = end_date === undefined ? current.end_date : end_date || null
+
   await db.execute({
     sql: 'UPDATE expenses SET name = COALESCE(?, name), amount = COALESCE(?, amount), renewal_day = ?, account_id = COALESCE(?, account_id), frequency = COALESCE(?, frequency), expense_type = COALESCE(?, expense_type), end_date = ? WHERE id = ?',
-    args: [orNull(name), orNull(amount), renewal_day || null, orNull(account_id), orNull(frequency), orNull(expense_type), end_date || null, req.params.id]
+    args: [orNull(name), orNull(amount), nextRenewalDay, orNull(account_id), orNull(frequency), orNull(expense_type), nextEndDate, req.params.id]
   })
   const result = await db.execute({ sql: 'SELECT * FROM expenses WHERE id = ?', args: [req.params.id] })
   res.json(result.rows[0])

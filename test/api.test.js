@@ -125,14 +125,60 @@ test('PUT /expenses/:id col solo amount lascia nome, conto, frequenza e tipo', a
   assert.ok(alive(), `il server è caduto:\n${serverLog}`)
 })
 
-test('un errore del database dentro una route torna 500 in JSON e il server resta su', async () => {
-  // UNIQUE(user_id, name): il secondo inserimento fa fallire la query
+test('PUT /expenses/:id senza renewal_day e end_date li lascia, con un valore vuoto li azzera', async () => {
+  const account = await call('/accounts', { method: 'POST', body: { name: 'Conto Rate' } })
+  const created = await call('/expenses', {
+    method: 'POST',
+    body: { account_id: account.json.id, name: 'MacBook', amount: 40.73, renewal_day: '27', expense_type: 'installment', end_date: '2027-03' },
+  })
+  assert.equal(created.status, 201)
+
+  const kept = await call(`/expenses/${created.json.id}`, { method: 'PUT', body: { amount: 41 } })
+  assert.equal(kept.status, 200, kept.text)
+  assert.equal(kept.json.renewal_day, '27')
+  assert.equal(kept.json.end_date, '2027-03')
+
+  // il form manda '' quando il campo è vuoto
+  const cleared = await call(`/expenses/${created.json.id}`, { method: 'PUT', body: { renewal_day: '', end_date: '' } })
+  assert.equal(cleared.status, 200, cleared.text)
+  assert.equal(cleared.json.renewal_day, null)
+  assert.equal(cleared.json.end_date, null)
+  assert.equal(cleared.json.amount, 41)
+})
+
+test('POST /accounts con un nome già usato torna 409 con un messaggio', async () => {
   const first = await call('/accounts', { method: 'POST', body: { name: 'Doppione' } })
   assert.equal(first.status, 201)
 
   const second = await call('/accounts', { method: 'POST', body: { name: 'Doppione' } })
-  assert.equal(second.status, 500, second.text)
-  assert.equal(typeof second.json?.error, 'string')
+  assert.equal(second.status, 409, second.text)
+  assert.equal(second.json.error, 'Esiste già un conto con questo nome')
+
+  // il nome è libero per un altro utente
+  const other = await otherUser('altro-nome')
+  const theirs = await call('/accounts', { method: 'POST', body: { name: 'Doppione' }, as: other })
+  assert.equal(theirs.status, 201, theirs.text)
+})
+
+test('PUT /accounts/:id sul nome di un altro conto torna 409, sul proprio nome no', async () => {
+  const a = await call('/accounts', { method: 'POST', body: { name: 'Primo' } })
+  const b = await call('/accounts', { method: 'POST', body: { name: 'Secondo' } })
+
+  const clash = await call(`/accounts/${b.json.id}`, { method: 'PUT', body: { name: 'Primo' } })
+  assert.equal(clash.status, 409, clash.text)
+  assert.equal(clash.json.error, 'Esiste già un conto con questo nome')
+
+  const same = await call(`/accounts/${a.json.id}`, { method: 'PUT', body: { name: 'Primo', icon: 'wallet' } })
+  assert.equal(same.status, 200, same.text)
+  assert.equal(same.json.icon, 'wallet')
+})
+
+test('un errore del database dentro una route torna 500 in JSON e il server resta su', async () => {
+  // un oggetto non si può passare come valore: la query fallisce
+  const account = await call('/accounts', { method: 'POST', body: { name: 'Conto Errore' } })
+  const res = await call('/expenses', { method: 'POST', body: { account_id: account.json.id, name: { a: 1 }, amount: 1 } })
+  assert.equal(res.status, 500, res.text)
+  assert.equal(res.json.error, 'Internal server error')
   assert.ok(alive(), `il server è caduto:\n${serverLog}`)
 
   const next = await call('/accounts')
