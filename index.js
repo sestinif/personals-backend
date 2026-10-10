@@ -13,6 +13,13 @@ const JWT_SECRET = process.env.JWT_SECRET || 'personals-secret-change-in-product
 app.use(cors())
 app.use(express.json())
 
+// Express 4 does not await async handlers: without this a rejected promise
+// is an unhandled rejection and Node exits. Forward it to the error handler.
+const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
+// libSQL throws on undefined args; null lets COALESCE keep the stored value
+const orNull = (value) => value === undefined ? null : value
+
 // === AUTH MIDDLEWARE ===
 
 function authenticate(req, res, next) {
@@ -31,7 +38,7 @@ function authenticate(req, res, next) {
 
 // === AUTH ROUTES ===
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', route(async (req, res) => {
   const { username, password } = req.body
   if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
   if (username.length < 3) return res.status(400).json({ error: 'Username deve avere almeno 3 caratteri' })
@@ -45,9 +52,9 @@ app.post('/api/auth/register', async (req, res) => {
   const userId = result.rows[0].id
   const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' })
   res.status(201).json({ token, user: { id: userId, username } })
-})
+}))
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', route(async (req, res) => {
   const { username, password } = req.body
   if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
 
@@ -59,13 +66,13 @@ app.post('/api/auth/login', async (req, res) => {
 
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' })
   res.json({ token, user: { id: user.id, username: user.username } })
-})
+}))
 
-app.get('/api/auth/me', authenticate, async (req, res) => {
+app.get('/api/auth/me', authenticate, route(async (req, res) => {
   const result = await db.execute({ sql: 'SELECT id, username, created_at FROM users WHERE id = ?', args: [req.userId] })
   if (!result.rows.length) return res.status(404).json({ error: 'User not found' })
   res.json(result.rows[0])
-})
+}))
 
 // === ALL ROUTES BELOW REQUIRE AUTH ===
 
@@ -75,12 +82,12 @@ app.use('/api/dashboard', authenticate)
 
 // === ACCOUNTS ===
 
-app.get('/api/accounts', async (req, res) => {
+app.get('/api/accounts', route(async (req, res) => {
   const result = await db.execute({ sql: 'SELECT * FROM accounts WHERE user_id = ? ORDER BY sort_order', args: [req.userId] })
   res.json(result.rows)
-})
+}))
 
-app.post('/api/accounts', async (req, res) => {
+app.post('/api/accounts', route(async (req, res) => {
   const { name, icon, color } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
   const maxOrder = await db.execute({ sql: 'SELECT COALESCE(MAX(sort_order), 0) as max FROM accounts WHERE user_id = ?', args: [req.userId] })
@@ -89,30 +96,30 @@ app.post('/api/accounts', async (req, res) => {
     args: [req.userId, name, icon || 'credit-card', color || '#6366f1', maxOrder.rows[0].max + 1]
   })
   res.status(201).json(result.rows[0])
-})
+}))
 
-app.put('/api/accounts/:id', async (req, res) => {
+app.put('/api/accounts/:id', route(async (req, res) => {
   const { name, icon, color } = req.body
   await db.execute({
     sql: 'UPDATE accounts SET name = COALESCE(?, name), icon = COALESCE(?, icon), color = COALESCE(?, color) WHERE id = ? AND user_id = ?',
-    args: [name, icon, color, req.params.id, req.userId]
+    args: [orNull(name), orNull(icon), orNull(color), req.params.id, req.userId]
   })
   const result = await db.execute({ sql: 'SELECT * FROM accounts WHERE id = ? AND user_id = ?', args: [req.params.id, req.userId] })
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' })
   res.json(result.rows[0])
-})
+}))
 
-app.delete('/api/accounts/:id', async (req, res) => {
+app.delete('/api/accounts/:id', route(async (req, res) => {
   // Delete expenses first (no CASCADE in libSQL)
   await db.execute({ sql: 'DELETE FROM expenses WHERE account_id = ?', args: [req.params.id] })
   const result = await db.execute({ sql: 'DELETE FROM accounts WHERE id = ? AND user_id = ?', args: [req.params.id, req.userId] })
   if (result.rowsAffected === 0) return res.status(404).json({ error: 'Account not found' })
   res.json({ success: true })
-})
+}))
 
 // === EXPENSES ===
 
-app.get('/api/expenses', async (req, res) => {
+app.get('/api/expenses', route(async (req, res) => {
   const { account_id } = req.query
   if (account_id) {
     const acc = await db.execute({ sql: 'SELECT id FROM accounts WHERE id = ? AND user_id = ?', args: [account_id, req.userId] })
@@ -126,9 +133,9 @@ app.get('/api/expenses', async (req, res) => {
     })
     res.json(result.rows)
   }
-})
+}))
 
-app.post('/api/expenses', async (req, res) => {
+app.post('/api/expenses', route(async (req, res) => {
   const { account_id, name, amount, renewal_day, frequency, expense_type, end_date } = req.body
   if (!account_id || !name || amount == null) return res.status(400).json({ error: 'account_id, name, and amount are required' })
 
@@ -140,9 +147,9 @@ app.post('/api/expenses', async (req, res) => {
     args: [account_id, name, amount, renewal_day || null, frequency || 'monthly', expense_type || 'subscription', end_date || null]
   })
   res.status(201).json(result.rows[0])
-})
+}))
 
-app.put('/api/expenses/:id', async (req, res) => {
+app.put('/api/expenses/:id', route(async (req, res) => {
   const { name, amount, renewal_day, account_id, frequency, expense_type, end_date } = req.body
   const check = await db.execute({
     sql: 'SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE e.id = ? AND a.user_id = ?',
@@ -152,13 +159,13 @@ app.put('/api/expenses/:id', async (req, res) => {
 
   await db.execute({
     sql: 'UPDATE expenses SET name = COALESCE(?, name), amount = COALESCE(?, amount), renewal_day = ?, account_id = COALESCE(?, account_id), frequency = COALESCE(?, frequency), expense_type = COALESCE(?, expense_type), end_date = ? WHERE id = ?',
-    args: [name, amount, renewal_day || null, account_id, frequency, expense_type, end_date || null, req.params.id]
+    args: [orNull(name), orNull(amount), renewal_day || null, orNull(account_id), orNull(frequency), orNull(expense_type), end_date || null, req.params.id]
   })
   const result = await db.execute({ sql: 'SELECT * FROM expenses WHERE id = ?', args: [req.params.id] })
   res.json(result.rows[0])
-})
+}))
 
-app.delete('/api/expenses/:id', async (req, res) => {
+app.delete('/api/expenses/:id', route(async (req, res) => {
   const check = await db.execute({
     sql: 'SELECT e.id FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE e.id = ? AND a.user_id = ?',
     args: [req.params.id, req.userId]
@@ -167,11 +174,11 @@ app.delete('/api/expenses/:id', async (req, res) => {
 
   await db.execute({ sql: 'DELETE FROM expenses WHERE id = ?', args: [req.params.id] })
   res.json({ success: true })
-})
+}))
 
 // === DASHBOARD ===
 
-app.get('/api/dashboard', async (req, res) => {
+app.get('/api/dashboard', route(async (req, res) => {
   const accountsResult = await db.execute({
     sql: `SELECT a.*,
             COALESCE(SUM(CASE WHEN e.frequency = 'yearly' OR LOWER(TRIM(e.renewal_day)) LIKE '%annuale%' THEN e.amount / 12.0 ELSE e.amount END), 0) as total
@@ -189,14 +196,24 @@ app.get('/api/dashboard', async (req, res) => {
   })
 
   res.json({ accounts, grandTotal, totalExpenses: Number(countResult.rows[0].count) })
-})
+}))
 
-app.get('/api/debug/expenses', authenticate, async (req, res) => {
+app.get('/api/debug/expenses', authenticate, route(async (req, res) => {
   const result = await db.execute({
     sql: 'SELECT e.id, e.name, e.amount, e.renewal_day, e.frequency, e.expense_type, e.end_date FROM expenses e JOIN accounts a ON a.id = e.account_id WHERE a.user_id = ?',
     args: [req.userId]
   })
   res.json(result.rows)
+}))
+
+// === ERROR HANDLER ===
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err)
+  // body-parser errors (malformed JSON, payload too large) carry their own 4xx status
+  const status = err.status >= 400 && err.status < 500 ? err.status : 500
+  if (status === 500) console.error(`${req.method} ${req.originalUrl}`, err)
+  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message })
 })
 
 app.listen(PORT, () => {
