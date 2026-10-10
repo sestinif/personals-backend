@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,10 +24,10 @@ const freePort = () => new Promise((resolve, reject) => {
   })
 })
 
-async function call(path, { method = 'GET', body } = {}) {
+async function call(path, { method = 'GET', body, as = token } = {}) {
   const res = await fetch(base + path, {
     method,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { 'content-type': 'application/json', ...(as ? { authorization: `Bearer ${as}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   const text = await res.text()
@@ -37,13 +38,20 @@ async function call(path, { method = 'GET', body } = {}) {
 
 const alive = () => server.exitCode === null && server.signalCode === null
 
+// Un secondo utente, per controllare che non tocchi i dati del primo
+async function otherUser(username) {
+  const reg = await call('/auth/register', { method: 'POST', body: { username, password: 'intruso123' } })
+  assert.equal(reg.status, 201, reg.text)
+  return reg.json.token
+}
+
 before(async () => {
   tmp = mkdtempSync(join(tmpdir(), 'personals-test-'))
   const port = await freePort()
   base = `http://127.0.0.1:${port}/api`
   server = spawn(process.execPath, ['index.js'], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), TURSO_DATABASE_URL: `file:${join(tmp, 'test.db')}`, TURSO_AUTH_TOKEN: '' },
+    env: { ...process.env, PORT: String(port), TURSO_DATABASE_URL: `file:${join(tmp, 'test.db')}`, TURSO_AUTH_TOKEN: '', JWT_SECRET: 'solo-per-i-test' },
   })
   server.stdout.on('data', (d) => { serverLog += d })
   server.stderr.on('data', (d) => { serverLog += d })
@@ -128,4 +136,72 @@ test('un JSON malformato torna 400 in JSON', async () => {
   assert.equal(res.status, 400)
   assert.equal(typeof (await res.json()).error, 'string')
   assert.ok(alive(), `il server è caduto:\n${serverLog}`)
+})
+
+test('DELETE /accounts/:id sul conto di un altro utente torna 404 e non gli cancella le spese', async () => {
+  const account = await call('/accounts', { method: 'POST', body: { name: 'Conto della vittima' } })
+  const expense = await call('/expenses', { method: 'POST', body: { account_id: account.json.id, name: 'Affitto', amount: 900 } })
+  assert.equal(expense.status, 201)
+
+  const intruder = await otherUser('intruso-delete')
+  const res = await call(`/accounts/${account.json.id}`, { method: 'DELETE', as: intruder })
+  assert.equal(res.status, 404, res.text)
+
+  const left = await call(`/expenses?account_id=${account.json.id}`)
+  assert.deepEqual(left.json.map((e) => e.name), ['Affitto'])
+})
+
+test('DELETE /accounts/:id sul proprio conto cancella il conto e le sue spese', async () => {
+  const account = await call('/accounts', { method: 'POST', body: { name: 'Conto da chiudere' } })
+  await call('/expenses', { method: 'POST', body: { account_id: account.json.id, name: 'Palestra', amount: 40 } })
+
+  const res = await call(`/accounts/${account.json.id}`, { method: 'DELETE' })
+  assert.equal(res.status, 200, res.text)
+
+  const all = await call('/expenses')
+  assert.ok(!all.json.some((e) => e.account_id === account.json.id), 'sono rimaste spese orfane')
+  const accounts = await call('/accounts')
+  assert.ok(!accounts.json.some((a) => a.id === account.json.id))
+})
+
+test('PUT /expenses/:id non sposta la spesa sul conto di un altro utente', async () => {
+  const victimAccount = await call('/accounts', { method: 'POST', body: { name: 'Conto bersaglio' } })
+
+  const intruder = await otherUser('intruso-put')
+  const ownAccount = await call('/accounts', { method: 'POST', body: { name: 'Conto mio' }, as: intruder })
+  const expense = await call('/expenses', { method: 'POST', body: { account_id: ownAccount.json.id, name: 'Intrusa', amount: 5 }, as: intruder })
+  assert.equal(expense.status, 201)
+
+  const res = await call(`/expenses/${expense.json.id}`, { method: 'PUT', body: { account_id: victimAccount.json.id }, as: intruder })
+  assert.equal(res.status, 403, res.text)
+
+  const victimExpenses = await call(`/expenses?account_id=${victimAccount.json.id}`)
+  assert.deepEqual(victimExpenses.json, [])
+  const own = await call(`/expenses?account_id=${ownAccount.json.id}`, { as: intruder })
+  assert.deepEqual(own.json.map((e) => e.name), ['Intrusa'])
+})
+
+test('PUT /expenses/:id sposta la spesa su un altro conto dello stesso utente', async () => {
+  const from = await call('/accounts', { method: 'POST', body: { name: 'Conto di partenza' } })
+  const to = await call('/accounts', { method: 'POST', body: { name: 'Conto di arrivo' } })
+  const expense = await call('/expenses', { method: 'POST', body: { account_id: from.json.id, name: 'Netflix', amount: 13 } })
+
+  const res = await call(`/expenses/${expense.json.id}`, { method: 'PUT', body: { account_id: to.json.id } })
+  assert.equal(res.status, 200, res.text)
+  assert.equal(res.json.account_id, to.json.id)
+})
+
+test('senza JWT_SECRET il server non parte', async () => {
+  const env = { ...process.env, PORT: String(await freePort()), TURSO_DATABASE_URL: `file:${join(tmp, 'no-secret.db')}`, TURSO_AUTH_TOKEN: '' }
+  delete env.JWT_SECRET
+  const child = spawn(process.execPath, ['index.js'], { cwd: root, env })
+  let log = ''
+  child.stdout.on('data', (d) => { log += d })
+  child.stderr.on('data', (d) => { log += d })
+  const timer = setTimeout(() => child.kill(), 3000)
+  const [code] = await once(child, 'exit')
+  clearTimeout(timer)
+
+  assert.equal(code, 1, `il server è partito lo stesso:\n${log}`)
+  assert.match(log, /JWT_SECRET/)
 })

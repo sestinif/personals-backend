@@ -4,11 +4,17 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import db, { initDb } from './db.js'
 
+// No fallback: a secret written in the code lets anyone forge a token
+const JWT_SECRET = process.env.JWT_SECRET
+if (!JWT_SECRET) {
+  console.error('JWT_SECRET is not set: refusing to start')
+  process.exit(1)
+}
+
 await initDb()
 
 const app = express()
 const PORT = process.env.PORT || 3001
-const JWT_SECRET = process.env.JWT_SECRET || 'personals-secret-change-in-production'
 
 app.use(cors())
 app.use(express.json())
@@ -110,8 +116,11 @@ app.put('/api/accounts/:id', route(async (req, res) => {
 }))
 
 app.delete('/api/accounts/:id', route(async (req, res) => {
-  // Delete expenses first (no CASCADE in libSQL)
-  await db.execute({ sql: 'DELETE FROM expenses WHERE account_id = ?', args: [req.params.id] })
+  // Delete expenses first (no CASCADE in libSQL), only if the account is the user's
+  await db.execute({
+    sql: 'DELETE FROM expenses WHERE account_id IN (SELECT id FROM accounts WHERE id = ? AND user_id = ?)',
+    args: [req.params.id, req.userId]
+  })
   const result = await db.execute({ sql: 'DELETE FROM accounts WHERE id = ? AND user_id = ?', args: [req.params.id, req.userId] })
   if (result.rowsAffected === 0) return res.status(404).json({ error: 'Account not found' })
   res.json({ success: true })
@@ -156,6 +165,11 @@ app.put('/api/expenses/:id', route(async (req, res) => {
     args: [req.params.id, req.userId]
   })
   if (!check.rows.length) return res.status(404).json({ error: 'Expense not found' })
+
+  if (account_id != null) {
+    const acc = await db.execute({ sql: 'SELECT id FROM accounts WHERE id = ? AND user_id = ?', args: [account_id, req.userId] })
+    if (!acc.rows.length) return res.status(403).json({ error: 'Account not owned by user' })
+  }
 
   await db.execute({
     sql: 'UPDATE expenses SET name = COALESCE(?, name), amount = COALESCE(?, amount), renewal_day = ?, account_id = COALESCE(?, account_id), frequency = COALESCE(?, frequency), expense_type = COALESCE(?, expense_type), end_date = ? WHERE id = ?',
