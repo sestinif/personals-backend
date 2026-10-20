@@ -152,7 +152,7 @@ test('POST /accounts con un nome già usato torna 409 con un messaggio', async (
 
   const second = await call('/accounts', { method: 'POST', body: { name: 'Doppione' } })
   assert.equal(second.status, 409, second.text)
-  assert.equal(second.json.error, 'Esiste già un conto con questo nome')
+  assert.equal(second.json.error, 'An account with this name already exists')
 
   // il nome è libero per un altro utente
   const other = await otherUser('altro-nome')
@@ -166,7 +166,7 @@ test('PUT /accounts/:id sul nome di un altro conto torna 409, sul proprio nome n
 
   const clash = await call(`/accounts/${b.json.id}`, { method: 'PUT', body: { name: 'Primo' } })
   assert.equal(clash.status, 409, clash.text)
-  assert.equal(clash.json.error, 'Esiste già un conto con questo nome')
+  assert.equal(clash.json.error, 'An account with this name already exists')
 
   const same = await call(`/accounts/${a.json.id}`, { method: 'PUT', body: { name: 'Primo', icon: 'wallet' } })
   assert.equal(same.status, 200, same.text)
@@ -304,4 +304,22 @@ test('senza ALLOW_REGISTRATION la registrazione è chiusa, il login no, e il see
   } finally {
     closed.kill()
   }
+})
+
+test('i messaggi di errore del login e della registrazione sono in inglese', async () => {
+  const empty = await call('/auth/login', { method: 'POST', body: {}, as: null })
+  assert.equal(empty.status, 400)
+  assert.equal(empty.json.error, 'Username and password are required')
+
+  const wrong = await call('/auth/login', { method: 'POST', body: { username: 'tester', password: 'sbagliata' }, as: null })
+  assert.equal(wrong.status, 401)
+  assert.equal(wrong.json.error, 'Invalid credentials')
+
+  const short = await call('/auth/register', { method: 'POST', body: { username: 'ab', password: 'abcdef' }, as: null })
+  assert.equal(short.status, 400)
+  assert.equal(short.json.error, 'Username must be at least 3 characters')
+
+  const taken = await call('/auth/register', { method: 'POST', body: { username: 'tester', password: 'abcdef' }, as: null })
+  assert.equal(taken.status, 409)
+  assert.equal(taken.json.error, 'Username already taken')
 })

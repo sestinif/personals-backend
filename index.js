@@ -46,15 +46,15 @@ function authenticate(req, res, next) {
 
 app.post('/api/auth/register', route(async (req, res) => {
   // Closed unless explicitly opened: this is a personal app, not a public signup
-  if (process.env.ALLOW_REGISTRATION !== 'true') return res.status(403).json({ error: 'Registrazione chiusa' })
+  if (process.env.ALLOW_REGISTRATION !== 'true') return res.status(403).json({ error: 'Registration is closed' })
 
   const { username, password } = req.body
-  if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
-  if (username.length < 3) return res.status(400).json({ error: 'Username deve avere almeno 3 caratteri' })
-  if (password.length < 6) return res.status(400).json({ error: 'Password deve avere almeno 6 caratteri' })
+  if (!username || !password) return res.status(400).json({ error: 'Username and password are required' })
+  if (username.length < 3) return res.status(400).json({ error: 'Username must be at least 3 characters' })
+  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' })
 
   const existing = await db.execute({ sql: 'SELECT id FROM users WHERE username = ?', args: [username] })
-  if (existing.rows.length) return res.status(409).json({ error: 'Username già in uso' })
+  if (existing.rows.length) return res.status(409).json({ error: 'Username already taken' })
 
   const hash = bcrypt.hashSync(password, 10)
   const result = await db.execute({ sql: 'INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id', args: [username, hash] })
@@ -65,12 +65,12 @@ app.post('/api/auth/register', route(async (req, res) => {
 
 app.post('/api/auth/login', route(async (req, res) => {
   const { username, password } = req.body
-  if (!username || !password) return res.status(400).json({ error: 'Username e password sono obbligatori' })
+  if (!username || !password) return res.status(400).json({ error: 'Username and password are required' })
 
   const result = await db.execute({ sql: 'SELECT * FROM users WHERE username = ?', args: [username] })
   const user = result.rows[0]
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: 'Credenziali non valide' })
+    return res.status(401).json({ error: 'Invalid credentials' })
   }
 
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' })
@@ -100,7 +100,7 @@ app.post('/api/accounts', route(async (req, res) => {
   const { name, icon, color } = req.body
   if (!name) return res.status(400).json({ error: 'Name is required' })
   const taken = await db.execute({ sql: 'SELECT id FROM accounts WHERE user_id = ? AND name = ?', args: [req.userId, name] })
-  if (taken.rows.length) return res.status(409).json({ error: 'Esiste già un conto con questo nome' })
+  if (taken.rows.length) return res.status(409).json({ error: 'An account with this name already exists' })
   const maxOrder = await db.execute({ sql: 'SELECT COALESCE(MAX(sort_order), 0) as max FROM accounts WHERE user_id = ?', args: [req.userId] })
   const result = await db.execute({
     sql: 'INSERT INTO accounts (user_id, name, icon, color, sort_order) VALUES (?, ?, ?, ?, ?) RETURNING *',
@@ -113,7 +113,7 @@ app.put('/api/accounts/:id', route(async (req, res) => {
   const { name, icon, color } = req.body
   if (name != null) {
     const taken = await db.execute({ sql: 'SELECT id FROM accounts WHERE user_id = ? AND name = ? AND id != ?', args: [req.userId, name, req.params.id] })
-    if (taken.rows.length) return res.status(409).json({ error: 'Esiste già un conto con questo nome' })
+    if (taken.rows.length) return res.status(409).json({ error: 'An account with this name already exists' })
   }
   await db.execute({
     sql: 'UPDATE accounts SET name = COALESCE(?, name), icon = COALESCE(?, icon), color = COALESCE(?, color) WHERE id = ? AND user_id = ?',
