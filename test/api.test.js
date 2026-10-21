@@ -323,3 +323,14 @@ test('i messaggi di errore del login e della registrazione sono in inglese', asy
   assert.equal(taken.status, 409)
   assert.equal(taken.json.error, 'Username already taken')
 })
+
+test('GET /withdrawals vuole il login, e senza Numbers collegato dice configured:false', async () => {
+  const anon = await call('/withdrawals', { as: null })
+  assert.equal(anon.status, 401)
+  const res = await call('/withdrawals')
+  assert.equal(res.status, 200, res.text)
+  assert.deepEqual(res.json, { configured: false })
+  const bad = await call('/withdrawals?month=boh')
+  assert.equal(bad.status, 200, 'senza Numbers collegato non si guarda nemmeno il mese')
+  assert.ok(alive(), `il server è caduto:\n${serverLog}`)
+})

@@ -3,6 +3,7 @@ import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import db, { initDb } from './db.js'
+import { loadWithdrawals } from './withdrawals.js'
 
 // No fallback: a secret written in the code lets anyone forge a token
 const JWT_SECRET = process.env.JWT_SECRET
@@ -88,6 +89,7 @@ app.get('/api/auth/me', authenticate, route(async (req, res) => {
 app.use('/api/accounts', authenticate)
 app.use('/api/expenses', authenticate)
 app.use('/api/dashboard', authenticate)
+app.use('/api/withdrawals', authenticate)
 
 // === ACCOUNTS ===
 
@@ -224,6 +226,13 @@ app.get('/api/dashboard', route(async (req, res) => {
   })
 
   res.json({ accounts, grandTotal, totalExpenses: Number(countResult.rows[0].count) })
+}))
+
+// === WITHDRAWALS (read from Numbers) ===
+
+app.get('/api/withdrawals', route(async (req, res) => {
+  const { status, body } = await loadWithdrawals({ env: process.env, month: req.query.month })
+  res.status(status).json(body)
 }))
 
 // === ERROR HANDLER ===
